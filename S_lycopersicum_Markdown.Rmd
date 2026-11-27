@@ -1,0 +1,316 @@
+---
+title: Comparative Transcriptome Analysis of *Solanum lycopersicum* Across Temperature
+  Regimes
+author: "Dr J Fouche"
+date: "November 2026"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+---
+
+##Summary
+RNA_Seq data (370.8GB) for Solanum lycopersicum were obtained from https://www.ncbi.nlm.nih.gov/bioproject/?term=PRJNA641520 and quantified with Kallisto against the SL3.1 reference genome. RNA-Seq reads were pseudoaligned and quantified against the Solanum lycopersicum SL3.1 reference genome using kallisto in a conda environment on Linux (Ubuntu 26.04).
+Six samples (3 biological replicates per condition) were compared: Cooler (20/12 °C day/night) vs. Warm (24/20 °C day/night).
+
+A single-factor DESeq2 model (`~ condition`) was fitted after filtering genes with a total count <= 200 (17,170 retained). Data quality was confirmed via PCA (replicates clustered by condition) and a dispersion plot. Differential expression was tested for the contrast Warm vs. Cooler (BH-adjusted p less than 0.05, |log₂FC| greater than 1), yielding 3,780 DEGs.
+
+Results were visualised as MA, volcano, and z-scored clustered heatmap (top 50 DEGs) plots. GO biological process enrichment (clusterProfiler, S. lycopersicum OrgDb via AnnotationHub) was performed on up- and down-regulated DEGs separately. The up-regulated set was enriched for cell wall biogenesis/remodelling (xyloglucan metabolism, cell wall polysaccharide metabolism) and cytokinin biosynthesis/signalling, indicating growth-promotion rather than a heat-stress response.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Packages used
+
+```{r packages}
+library(DESeq2)
+library(Matrix)
+library(dplyr)
+library(tidyverse)
+#BiocManager::install("EnhancedVolcano")
+library(EnhancedVolcano)
+library(ggplot2)
+library(car)
+library(patchwork)
+library(pheatmap)
+library(ComplexHeatmap)
+library(RColorBrewer)
+#BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+#BiocManager::install("AnnotationHub")
+library(AnnotationHub)
+library(AnnotationDbi)
+
+```
+
+## 1. Load Data
+
+```{r load_data}
+# Transposed counts from Kallisto
+counts <- t(readMM("output/counts_unfiltered/cells_x_genes.mtx"))
+rownames(counts) <- readLines("output/counts_unfiltered/cells_x_genes.genes.names.txt")
+colnames(counts) <- readLines("output/counts_unfiltered/cells_x_genes.barcodes.txt")
+counts <- as.matrix(counts)
+
+# Rename columns (order must match how samples were fed to Kallisto)
+colnames(counts) <- c("LyC_1","LyC_2","LyC_3",
+                      "PeC_1","PeC_2","PeC_3",
+                      "LyW_1","LyW_2","LyW_3",
+                      "PeW_1","PeW_2","PeW_3")
+
+# Subset to S. lycopersicum only
+ly_samples <- c("LyC_1", "LyC_2", "LyC_3", "LyW_1", "LyW_2", "LyW_3")
+counts_ly  <- counts[, ly_samples]
+
+# Cooler = 20/12°C (day/night)
+# Warm = 24/20°C (day/night)
+
+coldata_ly <- data.frame(
+  condition = factor(rep(c("Cooler", "Warm"), each = 3),
+                     levels = c("Cooler", "Warm")),
+  row.names = ly_samples
+)
+
+# Verify
+dim(counts_ly)
+head(coldata_ly)
+```
+
+## 2. Build DESeqDataSet
+
+```{r build_dds}
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_ly,
+  colData   = coldata_ly,
+  design    = ~ condition
+)
+```
+
+## 3. Filter Low-Count Genes
+
+```{r filter}
+keep <- rowSums(counts(dds)) > 200
+dds  <- dds[keep, ]
+cat("Genes retained:", nrow(dds), "\n")
+```
+
+## 4. PCA
+
+```{r pca}
+vsd <- vst(dds, blind = TRUE)
+pcaData <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+pct <- round(100 * attr(pcaData, "percentVar"))
+
+PCS_SLy <- ggplot(pcaData, aes(PC1, PC2, colour = condition)) +
+  geom_point(size = 4) +
+  xlab(paste0("PC1: ", pct[1], "%")) +
+  ylab(paste0("PC2: ", pct[2], "%")) +
+  coord_fixed() + theme_minimal()
+
+PCS_SLy
+```
+
+```{r save_pca, eval=TRUE}
+png("pca_lycopersicum.png", width = 10, height = 5, units = "in", res = 600)
+print(PCS_SLy)
+dev.off()
+```
+
+## 5. Run DESeq
+
+```{r deseq}
+dds <- DESeq(dds)
+```
+
+## 6. Dispersion Plot
+
+```{r dispersion}
+plotDispEsts(dds, main = "S. lycopersicum: Dispersion Estimates")
+```
+
+```{r save_dispersion, eval=TRUE}
+png("dispersion_lycopersicum.png", width = 10, height = 5, units = "in", res = 600)
+plotDispEsts(dds, main = "S. lycopersicum: Dispersion Estimates")
+dev.off()
+```
+
+## 7. Contrast
+
+```{r contrast}
+resultsNames(dds)
+# "Intercept"
+# "condition_Warm_vs_Cooler"
+
+res <- results(dds, name = "condition_Warm_vs_Cooler",
+               alpha = 1e-3, pAdjustMethod = "BH")
+
+# Summary
+table(res$padj < 0.05 & abs(res$log2FoldChange) > 1)
+```
+
+## 8. MA Plot
+
+```{r ma_plot}
+plotMA(res, main = "S. lycopersicum: Warm vs Cooler")
+```
+
+```{r save_ma, eval=TRUE}
+png("MA_lycopersicum.png", width = 10, height = 5, units = "in", res = 600)
+plotMA(res, main = "S. lycopersicum: Warm vs Cooler")
+dev.off()
+```
+
+## 9. Volcano Plot
+
+```{r volcano}
+top_genes <- rownames(res)[order(res$pvalue)][1:30]
+
+vol <- EnhancedVolcano(
+  res,
+  lab = rownames(res),
+  selectLab = top_genes,
+  title = "S. lycopersicum",
+  subtitle = "+ Up in Warm\n- Up in Cooler",
+  col = c("grey30", "gold", "royalblue", "red2"),
+  x = "log2FoldChange", y = "pvalue",
+  pCutoff = 0.05, FCcutoff = 1
+)
+
+vol
+```
+
+```{r save_volcano, eval=TRUE}
+png("volcano_lycopersicum.png", width = 10, height = 10, units = "in", res = 600)
+print(vol)
+dev.off()
+```
+
+## 10. Heatmap
+
+```{r heatmap}
+# Top 50 DEGs
+deg_sig <- rownames(res[which(res$padj < 0.05 & abs(res$log2FoldChange) > 1), ])
+if (length(deg_sig) > 50) deg_sig <- deg_sig[order(res[deg_sig, "padj"])]
+if (length(deg_sig) < 30) deg_sig <- rownames(vsd)[order(rowVars(assay(vsd)), decreasing = TRUE)][1:100]
+deg_sig <- head(deg_sig, 50)
+
+tmp1 <- assay(vsd)[deg_sig, ]
+tmp2 <- t(tmp1)
+tmp3 <- scale(tmp2)
+expr_scaled <- t(tmp3)
+dim(expr_scaled)
+
+ha <- HeatmapAnnotation(
+  condition = coldata_ly$condition,
+  col = list(condition = c(Cooler = "skyblue", Warm = "darkorange"))
+)
+
+ht <- Heatmap(
+  expr_scaled,
+  name = "Expression (z-scored)",
+  col = colorRampPalette(rev(brewer.pal(11, "RdBu")))(100),
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  show_row_names = TRUE,
+  row_names_gp = gpar(fontsize = 6),
+  column_names_gp = gpar(fontsize = 9),
+  border = TRUE,
+  top_annotation = ha
+)
+```
+
+```{r save_heatmap, eval=TRUE}
+png("heatmap_lycopersicum.png", width = 8, height = 10, units = "in", res = 600)
+draw(ht)
+dev.off()
+ht
+```
+
+## 11. Enrichment
+
+```{r enrichment_setup}
+library(clusterProfiler)
+library(AnnotationHub)
+library(AnnotationDbi)
+
+ah <- AnnotationHub()
+org.Sl.eg.db <- ah[["AH119847"]]
+keytypes(org.Sl.eg.db)
+```
+
+```{r id_conversion}
+# Define DEGs
+deg_up   <- rownames(res[res$padj < 0.05 & res$log2FoldChange > 1, ])
+deg_down <- rownames(res[res$padj < 0.05 & res$log2FoldChange < -1, ])
+
+# 1. LOC IDs → strip prefix → Entrez
+loc_genes  <- deg_up[grepl("^LOC", deg_up)]
+loc_entrez <- gsub("^LOC", "", loc_genes)
+
+mapped_loc <- bitr(loc_entrez,
+                   fromType = "ENTREZID",
+                   toType   = c("ENTREZID", "SYMBOL"),
+                   OrgDb    = org.Sl.eg.db)
+
+# 2. Non-LOC IDs → try as SYMBOL or ALIAS
+sym_genes  <- deg_up[!grepl("^LOC", deg_up)]
+
+mapped_sym <- bitr(sym_genes,
+                   fromType = "SYMBOL",
+                   toType   = c("ENTREZID", "SYMBOL"),
+                   OrgDb    = org.Sl.eg.db)
+
+if (nrow(mapped_sym) == 0) {
+  mapped_sym <- bitr(sym_genes,
+                     fromType = "ALIAS",
+                     toType   = c("ENTREZID", "SYMBOL"),
+                     OrgDb    = org.Sl.eg.db)
+}
+
+# 3. Combine
+mapped <- rbind(mapped_loc, mapped_sym)
+mapped <- mapped[!duplicated(mapped$ENTREZID), ]
+
+cat("Total up DEGs:", length(deg_up), "\n")
+cat("Mapped to Entrez:", nrow(mapped), "\n")
+cat("Unmapped:", length(deg_up) - nrow(mapped), "\n")
+```
+
+```{r universe}
+# Universe: LOC genes
+universe_loc <- gsub("^LOC", "", rownames(res)[grepl("^LOC", rownames(res))])
+all_entrez <- keys(org.Sl.eg.db, keytype = "ENTREZID")
+uni_loc <- universe_loc[universe_loc %in% all_entrez]
+
+# Universe: non-LOC genes (symbols)
+universe_sym <- rownames(res)[!grepl("^LOC", rownames(res))]
+uni_sym <- bitr(universe_sym,
+                fromType = "SYMBOL",
+                toType   = c("ENTREZID", "SYMBOL"),
+                OrgDb    = org.Sl.eg.db)
+
+universe_entrez <- unique(c(uni_loc, uni_sym$ENTREZID))
+cat("Universe size:", length(universe_entrez), "\n")
+```
+
+```{r go_enrichment}
+ego_up <- enrichGO(gene      = mapped$ENTREZID,
+                   universe  = universe_entrez,
+                   OrgDb     = org.Sl.eg.db,
+                   keyType   = "ENTREZID",
+                   ont       = "BP",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.2,
+                   readable      = TRUE)
+
+dotplot(ego_up, showCategory = 15) + ggtitle("Up in Warm — GO BP")
+```
+
+```{r go_results}
+ego_up$Description
+write.csv(as.data.frame(ego_up), "GO_BP_up_in_warm.csv", row.names = FALSE)
+```   
